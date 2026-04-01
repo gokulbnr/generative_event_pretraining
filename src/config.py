@@ -163,22 +163,29 @@ class SegConfig(Config):
     4: 1732771 (0.1262%)
     """
 
-    def __init__(self):
+    def __init__(self, eval_only: bool = False):
         super().__init__()
         self.encoder_mode = "ours"  # set to "ours" / "mem" / "ecddp" manually
         self.event_backbone = "vit" # ["vit", "swin"]
         self.swin_project   = False
 
         self._init_common_options()
+        # Allow the caller to request inference-only mode even when _init_common_options
+        # resets eval_only to False.  This must come after _init_common_options so that
+        # the constructor argument wins.
+        self.eval_only = eval_only
         self._init_mem_defaults()
         self._init_ecddp_defaults()
         self._apply_mode_overrides()
         self._init_palette()
         self._build_preprocessors()
-        self._build_datasets()
-
-        print(f"train dataset size: {len(self.train_dataset)}")
-        print(f"valid dataset size: {len(self.valid_dataset)}")
+        if not self.eval_only:
+            self._build_datasets()
+            print(f"train dataset size: {len(self.train_dataset)}")
+            print(f"valid dataset size: {len(self.valid_dataset)}")
+        else:
+            self.train_dataset = None
+            self.valid_dataset = None
 
     # ------------------------------------------------------------------ #
     # initialization helpers
@@ -303,14 +310,20 @@ class SegConfig(Config):
             self.vit = getattr(self, "vit", "base")
             
             if self.event_backbone == "swin":
-                ckpt = torch.load(
-                    "/data/storage/jianwen/cache/ckpts/2026-01-23-16:08_gpt/epoch25000_0.1571.pt",
-                    map_location="cpu",
-                )
-                self.event_encoder_weight = ckpt.get("event_encoder", None)
-                self.token_proj_weight = ckpt.get("token_proj", None)
-                self.dim_proj_weight = ckpt.get("dim_proj", None)
-                self.transformer_weight = None
+                if not self.eval_only:
+                    ckpt = torch.load(
+                        "/data/storage/jianwen/cache/ckpts/2026-01-23-16:08_gpt/epoch25000_0.1571.pt",
+                        map_location="cpu",
+                    )
+                    self.event_encoder_weight = ckpt.get("event_encoder", None)
+                    self.token_proj_weight = ckpt.get("token_proj", None)
+                    self.dim_proj_weight = ckpt.get("dim_proj", None)
+                    self.transformer_weight = None
+                else:
+                    self.event_encoder_weight = None
+                    self.token_proj_weight = None
+                    self.dim_proj_weight = None
+                    self.transformer_weight = None
 
                 if self.swin_project:
                     self.P = 14
@@ -319,7 +332,7 @@ class SegConfig(Config):
                     self.P = 32
                     self.n_embed = 768
             else:
-                encoder_weight = "/data/storage/jianwen/cache/ckpt_matters/gra_nima_16x.pt"
+                encoder_weight = None if self.eval_only else "/data/storage/jianwen/cache/ckpt_matters/gra_nima_16x.pt"
                 # transformer_weight = None
 
                 if 'encoder_weight' in locals() and encoder_weight is not None:

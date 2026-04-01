@@ -25,7 +25,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
 from torchvision.utils import make_grid, save_image
 from torchinfo import summary
 from tqdm import tqdm
@@ -485,7 +488,7 @@ class DepthEstimator(Transformer):
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.ckpt_dir = Path("/data/storage/jianwen/cache/ckpts") / f"{now}_dep"
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-        self.writer = SummaryWriter(log_dir=str(self.run_dir))
+        self.writer = SummaryWriter(log_dir=str(self.run_dir)) if SummaryWriter is not None else None
 
         if config.encoder_frozen:
             print("Freezing encoder parameters.")

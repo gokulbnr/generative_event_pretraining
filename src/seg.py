@@ -73,7 +73,11 @@ except ImportError:  # fall back to local src/ecddp.py
     ECDDPEncoderConfig = _ec_module.ECDDPEncoderConfig
     ECDDPEncoder = _ec_module.ECDDPEncoder
 
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
+
 class CenterPadding(torch.nn.Module):
     def __init__(self, multiple):
         super().__init__()
@@ -554,18 +558,29 @@ class SEG(Transformer):
         self._encoder_hw: Tuple[int, int] = (self.config.H, self.config.W)
         
         # training related
-        self.train_dataloader       = torch.utils.data.DataLoader(self.config.train_dataset, batch_size=self.config.batch_size, shuffle=True, num_workers=self.config.n_workers, pin_memory=True, drop_last=False)
-        self.valid_dataloader       = torch.utils.data.DataLoader(self.config.valid_dataset, batch_size=self.config.batch_size, shuffle=True, num_workers=self.config.n_workers, pin_memory=True, drop_last=False)
-        self.amp = torch.amp.autocast(device_type = "cuda")
-        self.scaler = torch.amp.GradScaler(device = "cuda")
-        self.optimizer = torch.optim.AdamW(get_param_groups(self, self.config.wd, self.config.encoder_lr_mult, self.config.transformer_lr_mult))
-        self.now = datetime.now().strftime("%Y-%m-%d-%H:%M")
-        self.iou = IOU(num_classes=self.config.C, ignore_index=self.config.ignore_index, device=self.config.device)
-        self.acc = PixelAccuracy(num_classes=self.config.C, ignore_index=self.config.ignore_index, device=self.config.device)
-        self.writer = None
         if not getattr(self.config, "eval_only", False):
-            os.makedirs("src/runs", exist_ok=True)
-            self.writer = SummaryWriter(log_dir=f"src/runs/{self.now}_seg")
+            self.train_dataloader = torch.utils.data.DataLoader(self.config.train_dataset, batch_size=self.config.batch_size, shuffle=True, num_workers=self.config.n_workers, pin_memory=True, drop_last=False)
+            self.valid_dataloader = torch.utils.data.DataLoader(self.config.valid_dataset, batch_size=self.config.batch_size, shuffle=True, num_workers=self.config.n_workers, pin_memory=True, drop_last=False)
+            self.amp = torch.amp.autocast(device_type="cuda")
+            self.scaler = torch.amp.GradScaler(device="cuda")
+            self.optimizer = torch.optim.AdamW(get_param_groups(self, self.config.wd, self.config.encoder_lr_mult, self.config.transformer_lr_mult))
+            self.now = datetime.now().strftime("%Y-%m-%d-%H:%M")
+            self.iou = IOU(num_classes=self.config.C, ignore_index=self.config.ignore_index, device=self.config.device)
+            self.acc = PixelAccuracy(num_classes=self.config.C, ignore_index=self.config.ignore_index, device=self.config.device)
+            self.writer = None
+            if SummaryWriter is not None:
+                os.makedirs("src/runs", exist_ok=True)
+                self.writer = SummaryWriter(log_dir=f"src/runs/{self.now}_seg")
+        else:
+            self.train_dataloader = None
+            self.valid_dataloader = None
+            self.amp = None
+            self.scaler = None
+            self.optimizer = None
+            self.now = None
+            self.iou = None
+            self.acc = None
+            self.writer = None
         if self.config.encoder_frozen:
             print("freeze event encoder")
             for name, param in self.named_parameters():

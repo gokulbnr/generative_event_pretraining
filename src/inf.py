@@ -215,7 +215,7 @@ def main():
             label_names = label_names[: args.limit]
     print(f"将对 {len(image_names)} 张图片进行推理与可视化。")
 
-    cfg = SegConfig()
+    cfg = SegConfig(eval_only=True)
     if args.device is not None:
         cfg.device = args.device
     os.makedirs(args.frame_dir, exist_ok=True)
