@@ -1,7 +1,9 @@
 import argparse
 import glob
+import io
 import math
 import os
+import urllib.request
 from pathlib import Path
 from typing import List
 
@@ -116,6 +118,15 @@ def colorize_confidence(conf_tensor: torch.Tensor) -> np.ndarray:
     return cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
 
 
+def load_image_from_source(source: str) -> Image.Image:
+    """Load a PIL RGB image from a local file path or a remote URL."""
+    if source.startswith("http://") or source.startswith("https://"):
+        with urllib.request.urlopen(source) as response:  # noqa: S310
+            data = response.read()
+        return Image.open(io.BytesIO(data)).convert("RGB")
+    return Image.open(source).convert("RGB")
+
+
 def load_checkpoint(model: SEG, checkpoint_path: str):
     """严格按照训练时的模块划分加载权重。"""
     ckpt = torch.load(checkpoint_path, map_location="cpu")
@@ -156,8 +167,13 @@ def prepare_palette(cfg: SegConfig) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Segmentation inference & visualization helper.")
     parser.add_argument("--checkpoint", type=str, default="/data/storage/jianwen/cache/ckpts/2025-11-14-02:04_seg/epoch8000_0.8904.pt", help="训练好的权重路径 (.pt)")
-    parser.add_argument("--image-glob", type=str, default="/data/storage/jianwen/DSEC/test_images/zurich_city_14_c/images/left/eventImage/*.png", help="输入图片 glob，比如 '/path/*.png'")
-    parser.add_argument("--label-glob", type=str, default="/data/storage/jianwen/DSEC/test_semantic_segmentation/test/zurich_city_14_c/11classes/*.png", help="标签 glob，需与图片数量一致")
+
+    # Input source: either a single image (path or URL) or a glob of images
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument("--input", type=str, default=None, help="单张输入图片的本地路径或 URL（与 --image-glob 互斥）")
+    input_group.add_argument("--image-glob", type=str, default=None, help="输入图片 glob，比如 '/path/*.png'")
+
+    parser.add_argument("--label-glob", type=str, default=None, help="标签 glob，需与图片数量一致；不提供时跳过 GT 面板")
     parser.add_argument("--frame-dir", type=str, default="14c_mem", help="保存逐帧结果的目录")
     parser.add_argument("--output-video", type=str, default="14c_mem.mp4", help="输出视频文件名")
     parser.add_argument("--fps", type=int, default=30, help="输出视频帧率")
@@ -174,17 +190,29 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
-    image_names = sorted(glob.glob(args.image_glob))
-    label_names = sorted(glob.glob(args.label_glob))
-    if not image_names:
-        raise FileNotFoundError(f"未找到匹配 {args.image_glob} 的图片")
-    if not label_names:
-        raise FileNotFoundError(f"未找到匹配 {args.label_glob} 的标签")
-    if len(image_names) != len(label_names):
+
+    # ------------------------------------------------------------------
+    # Resolve input sources
+    # ------------------------------------------------------------------
+    if args.input is not None:
+        # Single image: local path or URL
+        image_names: List[str] = [args.input]
+        label_names: List[str] = []
+    elif args.image_glob is not None:
+        image_names = sorted(glob.glob(args.image_glob))
+        if not image_names:
+            raise FileNotFoundError(f"未找到匹配 {args.image_glob} 的图片")
+        label_names = sorted(glob.glob(args.label_glob)) if args.label_glob else []
+    else:
+        raise ValueError("请通过 --input（单张图片/URL）或 --image-glob 指定输入图片")
+
+    has_labels = len(label_names) > 0
+    if has_labels and len(image_names) != len(label_names):
         raise ValueError(f"图片数量({len(image_names)}) 与标签数量({len(label_names)}) 不一致")
     if args.limit is not None:
         image_names = image_names[: args.limit]
-        label_names = label_names[: args.limit]
+        if has_labels:
+            label_names = label_names[: args.limit]
     print(f"将对 {len(image_names)} 张图片进行推理与可视化。")
 
     cfg = SegConfig()
@@ -207,12 +235,13 @@ def main():
     palette = prepare_palette(cfg)
     transform = cfg.valid_preprocessors
 
-    sample_img = Image.open(image_names[0]).convert("RGB")
-    sample_lbl = Image.open(label_names[0]).convert("L")
-    _, sample_lbl_tensor = transform(sample_img, sample_lbl)
-    h, w = sample_lbl_tensor.shape
+    # Determine output frame size from the first sample
+    sample_img = load_image_from_source(image_names[0])
+    sample_img_tensor, _ = transform(sample_img, None)
+    h, w = sample_img_tensor.shape[-2], sample_img_tensor.shape[-1]
     include_conf = args.save_confidence
-    num_columns = 3 + 1 + int(include_conf)  # input, pred, overlay, label, (optional conf)
+    # Columns: input | pred | overlay | [label] | [conf]
+    num_columns = 3 + int(has_labels) + int(include_conf)
     frame_h, frame_w = h, w * num_columns
 
     video_writer = None
@@ -227,10 +256,9 @@ def main():
     print(f"帧图片将保存至：{frame_dir.resolve()}")
 
     for idx in tqdm(range(len(image_names)), desc="Infer", unit="img"):
-        img_path = image_names[idx]
-        lbl_path = label_names[idx]
-        img = Image.open(img_path).convert("RGB")
-        lbl = Image.open(lbl_path).convert("L")
+        img_source = image_names[idx]
+        img = load_image_from_source(img_source)
+        lbl = Image.open(label_names[idx]).convert("L") if has_labels else None
         img_tensor, lbl_tensor = transform(img, lbl)
         img_for_model = img_tensor.unsqueeze(0).to(cfg.device)
 
@@ -240,7 +268,6 @@ def main():
 
         img_rgb = recover_input_image(img_tensor, cfg)
         overlay = blend_prediction(img_rgb, pred_color, args.alpha)
-        lbl_color = tensor_to_color(lbl_tensor, palette)
 
         conf_color = None
         if include_conf:
@@ -248,7 +275,10 @@ def main():
             conf_map = probs.max(dim=1).values.squeeze(0)
             conf_color = colorize_confidence(conf_map)
 
-        panels: List[np.ndarray] = [img_rgb, pred_color, overlay, lbl_color]
+        panels: List[np.ndarray] = [img_rgb, pred_color, overlay]
+        if has_labels and lbl_tensor is not None:
+            lbl_color = tensor_to_color(lbl_tensor, palette)
+            panels.append(lbl_color)
         if include_conf and conf_color is not None:
             panels.append(conf_color)
         concat = np.concatenate(panels, axis=1)
@@ -260,7 +290,8 @@ def main():
         Image.fromarray(img_rgb).save(frame_basename.with_name(f"{frame_basename.name}_img.png"))
         Image.fromarray(pred_color).save(frame_basename.with_name(f"{frame_basename.name}_pred.png"))
         Image.fromarray(overlay).save(frame_basename.with_name(f"{frame_basename.name}_overlay.png"))
-        Image.fromarray(lbl_color).save(frame_basename.with_name(f"{frame_basename.name}_lbl.png"))
+        if has_labels and lbl_tensor is not None:
+            Image.fromarray(lbl_color).save(frame_basename.with_name(f"{frame_basename.name}_lbl.png"))
         if include_conf and conf_color is not None:
             Image.fromarray(conf_color).save(frame_basename.with_name(f"{frame_basename.name}_conf.png"))
 
